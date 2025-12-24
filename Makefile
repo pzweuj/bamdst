@@ -1,5 +1,5 @@
 CC=		gcc
-CFLAGS=		-g -Wall -O2 
+CFLAGS=		-g -Wall -O2 -std=gnu99 
 DFLAGS=		-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DBGZF_CACHE
 LOBJS=		bgzf.o kstring.o bam_aux.o bam.o bam_import.o bam_index.o sam_header.o bedutil.o commons.o
 PROG=		bamdst

@@ -612,12 +612,12 @@ static float coverage_cal(const uint32_t *array, int l)
 int load_bed_init(char const *fn, aux_t *a)
 {
     int ret = 0;
-    int read_ret = bedHand->read(fn, a->h_tgt, 0, 0, &ret);
+    bedHand->read(fn, a->h_tgt, 0, 0, &ret);
     
-    // 检查 BED 文件是否被截断或读取失败
-    if (read_ret < 0)
+    // 检查 BED 文件是否为空
+    if (kh_size(a->h_tgt) == 0)
     {
-        errabort("Failed to read BED file: %s (file may be truncated or corrupted)", fn);
+        errabort("Failed to read BED file: %s (file may be empty or corrupted)", fn);
     }
     
     if (zero_based && ret)
@@ -1370,7 +1370,7 @@ uint64_t cntcov_cal_rmdup(struct opt_aux *f, struct regcov *cov, count32_t *cnt,
         return 0;
     
     // 计算各阈值下的覆盖度
-    uint64_t below_100 = 0, below_30 = 0, below_10 = 0, below_4 = 0, below_0 = 0;
+    uint64_t below_100 = 0, below_30 = 0, below_10 = 0, below_4 = 0;
     
     for (i = 0; i < cnt->m; ++i)
     {
@@ -1560,11 +1560,6 @@ static void json_uint(kstring_t *s, const char *key, uint64_t value)
 static void json_float(kstring_t *s, const char *key, float value)
 {
     ksprintf(s, "\"%s\":%.2f,", key, value);
-}
-
-static void json_float_array_value(kstring_t *s, float value)
-{
-    ksprintf(s, "%.2f,", value);
 }
 
 /* Generate JSON format coverage report */
