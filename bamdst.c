@@ -57,8 +57,10 @@ static bool stdin_lock = FALSE;
 static bool zero_based = TRUE;
 
 /* 定义 max cutoff 最大值为10 */
-
 static const int MAX_CUTOFFS = 10;
+
+/* I/O 缓冲区大小优化 - 64KB 缓冲区减少系统调用次数 */
+static const int WRITE_BUFFER_SIZE = 65536;
 
 /* The number of threads after which there are
    diminishing performance gains. */
@@ -882,7 +884,11 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
         {
             push_bedreg(para->ucreg, lst_start, lst_stop);
         }
-        write_buffer_bgzf(para->pdepths, para->fdep);
+        // 优化：只有当缓冲区超过阈值时才写入
+        if (para->pdepths->l > WRITE_BUFFER_SIZE)
+        {
+            write_buffer_bgzf(para->pdepths, para->fdep);
+        }
     }
     else
     {
@@ -890,6 +896,10 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
         for (j = 0; j < node->len; ++j)
         {
             ksprintf(para->pdepths, "%s\t%d\t0\t0\t0\n", para->name, node->start + j);
+        }
+        // 优化：批量写入而不是每行都写
+        if (para->pdepths->l > WRITE_BUFFER_SIZE)
+        {
             write_buffer_bgzf(para->pdepths, para->fdep);
         }
         push_bedreg(para->ucreg, node->start, node->stop); // store uncover region
@@ -901,8 +911,11 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
     ksprintf(para->rcov, "%s\t%u\t%u\t%.2f\t%.1f\t%.2f\t%.2f\n", para->name, node->start - 1, node->stop, avg, med,
              cov1, cov2);
 
-    // if (para->rcov->l > WINDOW_SIZE)
-    write_buffer_bgzf(para->rcov, para->freg);
+    // 优化：只有当缓冲区超过阈值时才写入
+    if (para->rcov->l > WRITE_BUFFER_SIZE)
+    {
+        write_buffer_bgzf(para->rcov, para->freg);
+    }
     return 0;
 }
 
@@ -1519,6 +1532,8 @@ int print_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
         warnings("Failed to create coverage.report.json");
         return -1;
     }
+    // 设置更大的文件缓冲区
+    setvbuf(fjson, NULL, _IOFBF, WRITE_BUFFER_SIZE);
     
     kstring_t json = {0, 0, NULL};
     
@@ -1701,6 +1716,9 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     FILE *fdep;
     finsert = open_wfile("insertsize.plot");
     fdep = open_wfile("depth_distribution.plot");
+    // 设置更大的文件缓冲区以减少系统调用
+    setvbuf(finsert, NULL, _IOFBF, WRITE_BUFFER_SIZE);
+    setvbuf(fdep, NULL, _IOFBF, WRITE_BUFFER_SIZE);
 
     struct regcov *tarcov = regcov_init();
     struct regcov *flkcov = regcov_init();
@@ -1748,6 +1766,8 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     cntcov_cal_ratio(f, tarcov, a->c_dep, a->tgt_len);
 
     FILE *fchrcov = open_wfile("chromosomes.report");
+    // 设置更大的文件缓冲区
+    setvbuf(fchrcov, NULL, _IOFBF, WRITE_BUFFER_SIZE);
     {
         fprintf(fchrcov, "%11s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s", "#Chromosome", "DATA(%)", "Avg depth",
                 "Median", "Coverage%", "Cov 4x %", "Cov 10x %", "Cov 30x %", "Cov 100x %");
@@ -1808,6 +1828,8 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     }
     fclose(fchrcov);
     FILE *fc = open_wfile("coverage.report");
+    // 设置更大的文件缓冲区以减少系统调用
+    setvbuf(fc, NULL, _IOFBF, WRITE_BUFFER_SIZE);
     do
     {
         fprintf(fc, "## The file was created by %s\n", program_name);
