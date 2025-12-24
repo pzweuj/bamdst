@@ -71,17 +71,21 @@ value for reasonal visual purpose. Default is 2000.
 
 set this cutoff value for calculate the bad covered region. Default is <5.
 
---use_rmdup (an invalid parament since v1.0.0 )
+--depthratio [ratios]
 
-Use rmdup depth instead of cover depth to calculate the coverage of target regions and
+specify depth ratios for coverage calculation relative to average depth.
 
-so on.
+Use comma-separated values like "0.1,0.2,0.5". Default is "0.2,0.5".
+
+This calculates coverage at positions with depth > (ratio × average_depth).
 
 ## OUTPUT FILES
 
-Seven files will be created in the output direction. There are:
+Eight files will be created in the output direction. There are:
 
 -**coverage.report**
+
+-**coverage.report.json** (NEW: JSON format for programmatic access)
 
 -**cumu.plot**
 

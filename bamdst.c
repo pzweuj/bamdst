@@ -154,6 +154,11 @@ struct opt_aux
     int *cutoffs;    // 指向 cutoff 数组的指针
     int mapQ_lim;
     int maxdepth;
+    // 新增：深度比例参数
+    bool depth_ratio;   // 是否启用深度比例统计
+    int num_ratios;     // 比例数量
+    int max_ratios;     // 最大比例数量
+    float *ratios;      // 比例数组 (如 0.1, 0.2, 0.5)
 };
 
 // 一个函数来初始化 opt_aux 结构体
@@ -175,6 +180,21 @@ struct opt_aux init_opt_aux()
     opt.inputs = NULL;
     opt.isize_lim = 2000;
     opt.mapQ_lim = 20;
+    
+    // 初始化深度比例参数
+    opt.depth_ratio = TRUE;  // 默认启用
+    opt.num_ratios = 2;      // 默认2个比例
+    opt.max_ratios = MAX_CUTOFFS;
+    opt.ratios = malloc(opt.max_ratios * sizeof(float));
+    if (opt.ratios == NULL)
+    {
+        fprintf(stderr, "Memory allocation failed for ratios\n");
+        exit(EXIT_FAILURE);
+    }
+    // 设置默认比例值 0.2 和 0.5
+    opt.ratios[0] = 0.2f;
+    opt.ratios[1] = 0.5f;
+    
     return opt;
 }
 
@@ -458,6 +478,7 @@ Optional parameters:\n\
    -q [20]             map quality cutoff value, greater or equal to the value will be count\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
    --cutoffdepth [0,0] list the coverage of above these depths, allow maximal 10 cutoffs.\n\
+   --depthratio [0.2,0.5] coverage at ratios of average depth (e.g., 0.1,0.2,0.5)\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
    --bamout  BAMFILE   target reads will be exported to this bam file\n\
@@ -471,12 +492,18 @@ Optional parameters:\n\
   index these files.\n\n\
  - coverage.report     a report of the coverage information and reads \n\
                        information of whole target regions\n\
+ - coverage.report.json  JSON format of coverage report for easy parsing\n\
  - cumu.plot           distribution data of depth values\n\
  - insert.plot         distribution data of inferred insert size \n\
  - chromosome.report   coverage information for each chromosome\n\
  - region.tsv.gz       mean depth, median depth and coverage of each region\n\
  - depth.tsv.gz        raw depth, rmdup depth, coverage depth of each position\n\
  - uncover.bed         the bad covered or uncovered region in the probe file\n\
+\n\
+* New features in this version:\n\
+ - Rmdup coverage statistics: coverage based on deduplicated depth\n\
+ - Ratio-based coverage: coverage at ratios of average depth (e.g., 0.2x, 0.5x)\n\
+ - JSON output: coverage.report.json for programmatic access\n\
 \n\
 * About depth.tsv.gz:\n\
 * There are five columns in this file, including chromosome, position, raw\n\
@@ -1155,6 +1182,16 @@ struct regcov
     // MAX_CUTOFFS
     uint64_t cnt_array[10];
     float cov_array[10];
+    
+    // 新增：rmdup depth 覆盖度统计
+    uint64_t cnt_rmdup, cnt4_rmdup, cnt10_rmdup, cnt30_rmdup, cnt100_rmdup;
+    float cov_rmdup, cov4_rmdup, cov10_rmdup, cov30_rmdup, cov100_rmdup;
+    uint64_t cnt_array_rmdup[10];
+    float cov_array_rmdup[10];
+    
+    // 新增：基于比例的覆盖度统计
+    uint64_t cnt_ratio[10];
+    float cov_ratio[10];
 };
 
 struct regcov *regcov_init()
@@ -1280,6 +1317,110 @@ uint64_t cntcov_cal2(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint
     return rawcnt;
 }
 
+// 计算 rmdup depth 的覆盖度统计
+uint64_t cntcov_cal_rmdup(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint64_t *data, uint64_t tgt_len)
+{
+    uint64_t rawcnt = 0;
+    int i;
+    *data = 0;
+    
+    // 计算总数据量和平均深度
+    for (i = 0; i < cnt->m; ++i)
+    {
+        (*data) += cnt->a[i] * i;
+        rawcnt += cnt->a[i];
+    }
+    
+    if (rawcnt == 0)
+        return 0;
+    
+    // 计算各阈值下的覆盖度
+    uint64_t below_100 = 0, below_30 = 0, below_10 = 0, below_4 = 0, below_0 = 0;
+    
+    for (i = 0; i < cnt->m; ++i)
+    {
+        if (i < 100)
+            below_100 += cnt->a[i];
+        if (i < 30)
+            below_30 += cnt->a[i];
+        if (i < 10)
+            below_10 += cnt->a[i];
+        if (i < 4)
+            below_4 += cnt->a[i];
+        if (f->cutoff)
+        {
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                if (i < f->cutoffs[x])
+                    cov->cnt_array_rmdup[x] += cnt->a[i];
+            }
+        }
+    }
+    
+    // 计算 rmdup 覆盖度
+    cov->cnt_rmdup = rawcnt - (uint64_t)cnt->a[0];
+    cov->cnt4_rmdup = rawcnt - below_4;
+    cov->cnt10_rmdup = rawcnt - below_10;
+    cov->cnt30_rmdup = rawcnt - below_30;
+    cov->cnt100_rmdup = rawcnt - below_100;
+    
+    cov->cov_rmdup = (float)cov->cnt_rmdup / rawcnt * 100;
+    cov->cov4_rmdup = (float)cov->cnt4_rmdup / rawcnt * 100;
+    cov->cov10_rmdup = (float)cov->cnt10_rmdup / rawcnt * 100;
+    cov->cov30_rmdup = (float)cov->cnt30_rmdup / rawcnt * 100;
+    cov->cov100_rmdup = (float)cov->cnt100_rmdup / rawcnt * 100;
+    
+    if (f->cutoff)
+    {
+        for (int x = 0; x < f->num_cutoffs; x++)
+        {
+            cov->cnt_array_rmdup[x] = rawcnt - cov->cnt_array_rmdup[x];
+            cov->cov_array_rmdup[x] = (float)cov->cnt_array_rmdup[x] / rawcnt * 100;
+        }
+    }
+    
+    return rawcnt;
+}
+
+// 计算基于比例的覆盖度统计
+void cntcov_cal_ratio(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint64_t tgt_len)
+{
+    if (!f->depth_ratio || f->num_ratios == 0)
+        return;
+    
+    // 计算总数据量
+    uint64_t total_data = 0;
+    uint64_t rawcnt = 0;
+    int i;
+    
+    for (i = 0; i < cnt->m; ++i)
+    {
+        total_data += cnt->a[i] * i;
+        rawcnt += cnt->a[i];
+    }
+    
+    if (rawcnt == 0 || tgt_len == 0)
+        return;
+    
+    // 计算平均深度
+    float avg_depth = (float)total_data / tgt_len;
+    
+    // 对每个比例计算覆盖度
+    for (int r = 0; r < f->num_ratios; r++)
+    {
+        uint64_t threshold = (uint64_t)(f->ratios[r] * avg_depth);
+        uint64_t below_threshold = 0;
+        
+        for (i = 0; i < cnt->m && i <= threshold; ++i)
+        {
+            below_threshold += cnt->a[i];
+        }
+        
+        cov->cnt_ratio[r] = rawcnt - below_threshold;
+        cov->cov_ratio[r] = (float)cov->cnt_ratio[r] / rawcnt * 100;
+    }
+}
+
 // FIXME: need improve soon!!!
 float median_cnt(count32_t *cnt)
 {
@@ -1309,6 +1450,247 @@ float average_cnt(count32_t *cnt)
         num += (uint64_t)cnt->a[i];
     }
     return (float)sum / num;
+}
+
+/* JSON string builder utilities */
+static void json_start_object(kstring_t *s)
+{
+    kputc('{', s);
+}
+
+static void json_end_object(kstring_t *s)
+{
+    // Remove trailing comma if present
+    if (s->l > 0 && s->s[s->l - 1] == ',')
+        s->l--;
+    kputc('}', s);
+}
+
+static void json_start_array(kstring_t *s)
+{
+    kputc('[', s);
+}
+
+static void json_end_array(kstring_t *s)
+{
+    if (s->l > 0 && s->s[s->l - 1] == ',')
+        s->l--;
+    kputc(']', s);
+}
+
+static void json_key(kstring_t *s, const char *key)
+{
+    ksprintf(s, "\"%s\":", key);
+}
+
+static void json_string(kstring_t *s, const char *key, const char *value)
+{
+    ksprintf(s, "\"%s\":\"%s\",", key, value);
+}
+
+static void json_int(kstring_t *s, const char *key, int64_t value)
+{
+    ksprintf(s, "\"%s\":%" PRId64 ",", key, value);
+}
+
+static void json_uint(kstring_t *s, const char *key, uint64_t value)
+{
+    ksprintf(s, "\"%s\":%" PRIu64 ",", key, value);
+}
+
+static void json_float(kstring_t *s, const char *key, float value)
+{
+    ksprintf(s, "\"%s\":%.2f,", key, value);
+}
+
+static void json_float_array_value(kstring_t *s, float value)
+{
+    ksprintf(s, "%.2f,", value);
+}
+
+/* Generate JSON format coverage report */
+int print_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
+                      struct regcov *tarcov, struct regcov *flkcov, 
+                      struct regcov *regcov, float iavg, uint64_t imed)
+{
+    if (outdir) chdir(outdir);
+    FILE *fjson = open_wfile("coverage.report.json");
+    if (!fjson) {
+        warnings("Failed to create coverage.report.json");
+        return -1;
+    }
+    
+    kstring_t json = {0, 0, NULL};
+    
+    json_start_object(&json);
+    
+    // Version and files
+    json_string(&json, "version", Version);
+    json_key(&json, "files");
+    json_start_array(&json);
+    for (int i = 0; i < f->nfiles; ++i) {
+        ksprintf(&json, "\"%s\",", f->inputs[i]);
+    }
+    json_end_array(&json);
+    kputc(',', &json);
+    
+    // Total section
+    json_key(&json, "total");
+    json_start_object(&json);
+    json_uint(&json, "raw_reads", fs->n_reads);
+    json_uint(&json, "qc_fail_reads", fs->n_qcfail);
+    json_float(&json, "raw_data_mb", (float)fs->n_data / 1e6);
+    json_uint(&json, "paired_reads", fs->n_pair_all);
+    json_uint(&json, "mapped_reads", fs->n_mapped);
+    json_float(&json, "mapped_reads_fraction", (float)fs->n_mapped / fs->n_reads * 100);
+    json_float(&json, "mapped_data_mb", (float)fs->n_mdata / 1e6);
+    json_float(&json, "mapped_data_fraction", (float)fs->n_mdata / fs->n_data * 100);
+    json_uint(&json, "properly_paired", fs->n_pair_good);
+    json_float(&json, "properly_paired_fraction", (float)fs->n_pair_good / fs->n_reads * 100);
+    json_uint(&json, "read_mate_paired", fs->n_pair_map);
+    json_float(&json, "read_mate_paired_fraction", (float)fs->n_pair_map / fs->n_reads * 100);
+    json_uint(&json, "singletons", fs->n_sgltn);
+    json_uint(&json, "diff_chr", fs->n_diffchr);
+    json_uint(&json, "read1", fs->n_read1);
+    json_uint(&json, "read2", fs->n_read2);
+    json_uint(&json, "read1_rmdup", fs->n_rmdup1);
+    json_uint(&json, "read2_rmdup", fs->n_rmdup2);
+    json_uint(&json, "forward_strand", fs->n_pstrand);
+    json_uint(&json, "backward_strand", fs->n_mstrand);
+    json_uint(&json, "pcr_duplicates", fs->n_dup);
+    json_float(&json, "pcr_duplicates_fraction", (float)fs->n_dup / fs->n_mapped * 100);
+    json_int(&json, "mapq_cutoff", f->mapQ_lim);
+    json_uint(&json, "mapq_reads", fs->n_qual);
+    json_float(&json, "mapq_reads_fraction_all", (float)fs->n_qual / fs->n_reads * 100);
+    json_float(&json, "mapq_reads_fraction_mapped", (float)fs->n_qual / fs->n_mapped * 100);
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Insert size section
+    json_key(&json, "insert_size");
+    json_start_object(&json);
+    json_float(&json, "average", iavg);
+    json_uint(&json, "median", imed);
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Target section
+    json_key(&json, "target");
+    json_start_object(&json);
+    json_uint(&json, "target_reads", fs->n_tgt);
+    json_float(&json, "target_reads_fraction_all", (float)fs->n_tgt / fs->n_reads * 100);
+    json_float(&json, "target_reads_fraction_mapped", (float)fs->n_tgt / fs->n_mapped * 100);
+    json_float(&json, "target_data_mb", (float)fs->n_tdata / 1e6);
+    json_float(&json, "target_data_rmdup_mb", (float)fs->n_trmdat / 1e6);
+    json_float(&json, "target_data_fraction_all", (float)fs->n_tdata / fs->n_data * 100);
+    json_float(&json, "target_data_fraction_mapped", (float)fs->n_tdata / fs->n_mdata * 100);
+    json_uint(&json, "region_length", a->tgt_len);
+    json_float(&json, "average_depth", (float)fs->n_tdata / a->tgt_len);
+    json_float(&json, "average_depth_rmdup", (float)fs->n_trmdat / a->tgt_len);
+    
+    // Coverage sub-object
+    json_key(&json, "coverage");
+    json_start_object(&json);
+    json_float(&json, "gt_0x", tarcov->cov);
+    json_float(&json, "gte_4x", tarcov->cov4);
+    json_float(&json, "gte_10x", tarcov->cov10);
+    json_float(&json, "gte_30x", tarcov->cov30);
+    json_float(&json, "gte_100x", tarcov->cov100);
+    json_float(&json, "gt_0_2_avg", tarcov->cov02x);
+    json_float(&json, "gt_0_5_avg", tarcov->cov05x);
+    if (f->cutoff) {
+        json_key(&json, "custom");
+        json_start_object(&json);
+        for (int x = 0; x < f->num_cutoffs; x++) {
+            char key[32];
+            sprintf(key, "gte_%dx", f->cutoffs[x]);
+            json_float(&json, key, tarcov->cov_array[x]);
+        }
+        json_end_object(&json);
+        kputc(',', &json);
+    }
+    if (f->depth_ratio && f->num_ratios > 0) {
+        json_key(&json, "ratio_based");
+        json_start_object(&json);
+        for (int r = 0; r < f->num_ratios; r++) {
+            char key[32];
+            sprintf(key, "gt_%.1f_avg", f->ratios[r]);
+            json_float(&json, key, tarcov->cov_ratio[r]);
+        }
+        json_end_object(&json);
+        kputc(',', &json);
+    }
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Coverage rmdup sub-object
+    json_key(&json, "coverage_rmdup");
+    json_start_object(&json);
+    json_float(&json, "gt_0x", tarcov->cov_rmdup);
+    json_float(&json, "gte_4x", tarcov->cov4_rmdup);
+    json_float(&json, "gte_10x", tarcov->cov10_rmdup);
+    json_float(&json, "gte_30x", tarcov->cov30_rmdup);
+    json_float(&json, "gte_100x", tarcov->cov100_rmdup);
+    if (f->cutoff) {
+        json_key(&json, "custom");
+        json_start_object(&json);
+        for (int x = 0; x < f->num_cutoffs; x++) {
+            char key[32];
+            sprintf(key, "gte_%dx", f->cutoffs[x]);
+            json_float(&json, key, tarcov->cov_array_rmdup[x]);
+        }
+        json_end_object(&json);
+        kputc(',', &json);
+    }
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Region coverage
+    json_uint(&json, "region_count", a->tgt_nreg);
+    json_key(&json, "region_coverage");
+    json_start_object(&json);
+    json_uint(&json, "gt_0x_count", regcov->cnt);
+    json_float(&json, "gt_0x_fraction", regcov->cov);
+    json_float(&json, "gte_4x_fraction", regcov->cov4);
+    json_float(&json, "gte_10x_fraction", regcov->cov10);
+    json_float(&json, "gte_30x_fraction", regcov->cov30);
+    json_float(&json, "gte_100x_fraction", regcov->cov100);
+    json_end_object(&json);
+    
+    json_end_object(&json);  // end target
+    kputc(',', &json);
+    
+    // Flank section
+    json_key(&json, "flank");
+    json_start_object(&json);
+    json_int(&json, "flank_size", flank_reg);
+    json_uint(&json, "region_length", a->flk_len);
+    json_float(&json, "average_depth", (float)fs->n_fdata / a->flk_len);
+    json_uint(&json, "flank_reads", fs->n_flk);
+    json_float(&json, "flank_reads_fraction_all", (float)fs->n_flk / fs->n_reads * 100);
+    json_float(&json, "flank_reads_fraction_mapped", (float)fs->n_flk / fs->n_mapped * 100);
+    json_float(&json, "flank_data_mb", (float)fs->n_fdata / 1e6);
+    json_float(&json, "flank_data_fraction_all", (float)fs->n_fdata / fs->n_data * 100);
+    json_float(&json, "flank_data_fraction_mapped", (float)fs->n_fdata / fs->n_mdata * 100);
+    json_key(&json, "coverage");
+    json_start_object(&json);
+    json_float(&json, "gt_0x", flkcov->cov);
+    json_float(&json, "gte_4x", flkcov->cov4);
+    json_float(&json, "gte_10x", flkcov->cov10);
+    json_float(&json, "gte_30x", flkcov->cov30);
+    json_float(&json, "gte_100x", flkcov->cov100);
+    json_end_object(&json);
+    
+    json_end_object(&json);  // end flank
+    
+    json_end_object(&json);  // end root
+    
+    // Write to file
+    fprintf(fjson, "%s\n", json.s);
+    fclose(fjson);
+    free(json.s);
+    
+    return 0;
 }
 
 int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
@@ -1357,6 +1739,13 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     cntcov_cal(f, flkcov, a->c_flkdep, &fs->n_fdata);
     for (i = 0; i < a->c_rmdupdep->m; ++i)
         fs->n_trmdat += a->c_rmdupdep->a[i] * i;
+    
+    // 计算 rmdup depth 覆盖度统计
+    uint64_t rmdup_data;
+    cntcov_cal_rmdup(f, tarcov, a->c_rmdupdep, &rmdup_data, a->tgt_len);
+    
+    // 计算基于比例的覆盖度统计
+    cntcov_cal_ratio(f, tarcov, a->c_dep, a->tgt_len);
 
     FILE *fchrcov = open_wfile("chromosomes.report");
     {
@@ -1492,6 +1881,31 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                 fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->cov_array[x]);
             }
         }
+        // rmdup coverage statistics
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>0x)", tarcov->cov_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=4x)", tarcov->cov4_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=10x)", tarcov->cov10_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=30x)", tarcov->cov30_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=100x)", tarcov->cov100_rmdup);
+        if (f->cutoff)
+        {
+            char titles[60];
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                sprintf(titles, "[Target] Coverage(rmdup) (>=%ux)", f->cutoffs[x]);
+                fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->cov_array_rmdup[x]);
+            }
+        }
+        // ratio-based coverage statistics
+        if (f->depth_ratio && f->num_ratios > 0)
+        {
+            char titles[60];
+            for (int r = 0; r < f->num_ratios; r++)
+            {
+                sprintf(titles, "[Target] Coverage (>%.1f*Avg)", f->ratios[r]);
+                fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->cov_ratio[r]);
+            }
+        }
         // tgt regions
         fprintf(fc, "%60s\t%u\n", "[Target] Target Region Count", a->tgt_nreg);
         fprintf(fc, "%60s\t%" PRIu64 "\n", "[Target] Region covered > 0x", regcov->cnt);
@@ -1542,6 +1956,9 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 
     } while (0);
 
+    // 生成 JSON 格式报告
+    print_report_json(f, a, fs, tarcov, flkcov, regcov, iavg, imed);
+
     mustfree(tarcov);
     mustfree(regcov);
     mustfree(flkcov);
@@ -1556,6 +1973,7 @@ enum
     INSERTSIZE,
     UNCOVER,
     BAMOUT,
+    DEPTHRATIO,
     HELP
 };
 
@@ -1568,6 +1986,7 @@ static struct option const long_opts[] = {{"outdir", required_argument, NULL, 'o
                                           {"mapthres", required_argument, NULL, 'q'},
                                           {"uncover", required_argument, NULL, UNCOVER},
                                           {"bamout", required_argument, NULL, BAMOUT},
+                                          {"depthratio", required_argument, NULL, DEPTHRATIO},
                                           //{"rmdup", no_argument, NULL, 'd'},
                                           {"help", no_argument, NULL, 'h'},
                                           {"version", no_argument, NULL, 'v'}};
@@ -1631,6 +2050,29 @@ int bamdst(int argc, char *argv[])
             break;
         case BAMOUT:
             export_target_bam = strdup(optarg);
+            break;
+        case DEPTHRATIO:
+            // 解析用户指定的深度比例
+            {
+                char *ratio_token = strtok(optarg, ",");
+                opt.num_ratios = 0;  // 重置为用户指定的值
+                while (ratio_token != NULL)
+                {
+                    if (opt.num_ratios >= opt.max_ratios)
+                    {
+                        fprintf(stderr, "Too many depth ratios specified (max %d)\n", opt.max_ratios);
+                        exit(EXIT_FAILURE);
+                    }
+                    float ratio = atof(ratio_token);
+                    if (ratio <= 0.0f || ratio > 1.0f)
+                    {
+                        fprintf(stderr, "Invalid depth ratio: %s (must be between 0 and 1)\n", ratio_token);
+                        exit(EXIT_FAILURE);
+                    }
+                    opt.ratios[opt.num_ratios++] = ratio;
+                    ratio_token = strtok(NULL, ",");
+                }
+            }
             break;
         case 'q':
             opt.mapQ_lim = atoi(optarg);
@@ -1730,6 +2172,7 @@ int bamdst(int argc, char *argv[])
     if (export_target_bam)
         bam_close(bamoutfp);
     freemem(opt.cutoffs);
+    freemem(opt.ratios);
 freeall:
     freemem(export_target_bam);
     freemem(outdir);
