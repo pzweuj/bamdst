@@ -1,29 +1,43 @@
 # bamdst -- a BAM Depth Stat Tool
 
-Bamdst is a lightweight tool to stat the depth coverage of  target regions of bam file(s).
+Bamdst is a lightweight tool to stat the depth coverage of target regions of bam file(s).
 
 Bam file(s) should be properly sorted, and the probe file (bed file) and the output dir
 
 must be specified in the first place.
 
+## Dependencies
+
+- **htslib** - Required for BAM/CRAM/SAM file reading and writing
+- **zlib** - Required for compression
+- **pthread** - Required for multi-threading support
+
+On Debian/Ubuntu:
+```bash
+apt-get install libhts-dev zlib1g-dev
+```
+
+On macOS with Homebrew:
+```bash
+brew install htslib
+```
+
 ## Install
 ```
-git clone https://github.com/shiquan/bamdst
+git clone https://github.com/pzweuj/bamdst
 cd bamdst
 make
 ```
-
-Or by conda. Thanks @xdgene
-```
-conda install xdgene::bamdst
-```
-
 
 ## USAGE
 
 Normal:
 
 	bamdst -p <probe.bed> -o ./ in1.bam
+
+With multi-threading (8 threads):
+
+	bamdst -p <probe.bed> -o ./ --threads 8 in1.bam
 
 Pipeline mode:
 
@@ -78,6 +92,11 @@ specify depth ratios for coverage calculation relative to average depth.
 Use comma-separated values like "0.1,0.2,0.5". Default is "0.2,0.5".
 
 This calculates coverage at positions with depth > (ratio × average_depth).
+
+--threads [num]
+
+set the number of threads for BAM/CRAM I/O operations. Uses htslib's native
+multi-threading for faster decompression and compression. Default is 0 (single-threaded mode).
 
 ## OUTPUT FILES
 

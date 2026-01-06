@@ -28,7 +28,7 @@ libbam.a:$(LOBJS)
 		$(AR) -csru $@ $(LOBJS)
 
 bamdst:lib
-		$(CC) $(CFLAGS) -o $@ $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm -lbam $(HTSLIB_LIBS) -lz -lpthread
+		$(CC) $(CFLAGS) -o $@ $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm $(HTSLIB_LIBS) -lz -lpthread
 
 bgzf.o:bgzf.c bgzf.h
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bgzf.c -o $@

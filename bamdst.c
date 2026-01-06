@@ -45,7 +45,7 @@
 #include <sys/stat.h>
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.2.0";
+static char const *Version = "2.0.0";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -77,7 +77,7 @@ static const int WRITE_BUFFER_SIZE = 65536;
 
 /* export target reads to a specitified bam file */
 static char *export_target_bam = NULL;
-bamFile bamoutfp;
+htsFile *bamoutfp = NULL;
 
 int check_filename_isbam(char *name)
 {
@@ -165,6 +165,8 @@ struct opt_aux
     float *ratios;      // 比例数组 (如 0.1, 0.2, 0.5)
     // 新增：参考基因组路径（用于 CRAM 文件）
     char *reference;    // 参考基因组 FASTA 文件路径
+    // 新增：线程数
+    int nthreads;       // htslib 多线程压缩/解压缩线程数
 };
 
 // 一个函数来初始化 opt_aux 结构体
@@ -203,7 +205,10 @@ struct opt_aux init_opt_aux()
     
     // 初始化参考基因组路径
     opt.reference = NULL;
-    
+
+    // 初始化线程数（0 = 单线程模式，不使用多线程）
+    opt.nthreads = 0;
+
     return opt;
 }
 
@@ -493,6 +498,7 @@ Optional parameters:\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
    --bamout  BAMFILE   target reads will be exported to this bam file\n\
+   --threads [0]       number of threads for BAM/CRAM I/O (0 = single-threaded)\n\
    -1                  begin position of bed file is 1-based\n\
    -h, --help          print this help info\n\
 \n");
@@ -2074,6 +2080,7 @@ enum
     BAMOUT,
     DEPTHRATIO,
     REFERENCE,
+    THREADS,
     HELP
 };
 
@@ -2088,6 +2095,7 @@ static struct option const long_opts[] = {{"outdir", required_argument, NULL, 'o
                                           {"bamout", required_argument, NULL, BAMOUT},
                                           {"depthratio", required_argument, NULL, DEPTHRATIO},
                                           {"reference", required_argument, NULL, 'T'},
+                                          {"threads", required_argument, NULL, THREADS},
                                           //{"rmdup", no_argument, NULL, 'd'},
                                           {"help", no_argument, NULL, 'h'},
                                           {"version", no_argument, NULL, 'v'}};
@@ -2182,6 +2190,14 @@ int bamdst(int argc, char *argv[])
             // 参考基因组路径（用于 CRAM 文件）
             opt.reference = strdup(optarg);
             break;
+        case THREADS:
+            opt.nthreads = atoi(optarg);
+            if (opt.nthreads < 0)
+            {
+                fprintf(stderr, "Invalid thread count: %s\n", optarg);
+                exit(EXIT_FAILURE);
+            }
+            break;
         case 'h':
             usage(1);
             break;
@@ -2215,6 +2231,14 @@ int bamdst(int argc, char *argv[])
         aux->data[0] = hts_open("-", "r");
         if (aux->data[0] == NULL)
             errabort("Failed to open stdin for reading");
+        // Enable multi-threading for stdin reading
+        if (opt.nthreads > 0)
+        {
+            if (hts_set_threads(aux->data[0], opt.nthreads) != 0)
+            {
+                fprintf(stderr, "Warning: Failed to set %d threads for stdin\n", opt.nthreads);
+            }
+        }
         // Set reference for CRAM if provided
         if (opt.reference)
         {
@@ -2248,7 +2272,16 @@ int bamdst(int argc, char *argv[])
             }
             if (aux->data[i] == NULL)
                 errabort("%s: %s", argv[optind + i], strerror(errno));
-            
+
+            // Enable multi-threading for BAM/CRAM reading
+            if (opt.nthreads > 0)
+            {
+                if (hts_set_threads(aux->data[i], opt.nthreads) != 0)
+                {
+                    fprintf(stderr, "Warning: Failed to set %d threads for %s\n", opt.nthreads, argv[optind + i]);
+                }
+            }
+
             // Check if CRAM and reference is needed
             const htsFormat *fmt = hts_get_format(aux->data[i]);
             if (fmt->format == cram)
@@ -2285,11 +2318,19 @@ int bamdst(int argc, char *argv[])
     // 第一个文件的 header 会被用于输出
     if (export_target_bam)
     {
-        bamoutfp = bgzf_open(export_target_bam, "w");
+        bamoutfp = hts_open(export_target_bam, "wb");
         if (bamoutfp == NULL)
             errabort("%s : %s", export_target_bam, strerror(errno));
+        // Enable multi-threading for BAM writing
+        if (opt.nthreads > 0)
+        {
+            if (hts_set_threads(bamoutfp, opt.nthreads) != 0)
+            {
+                fprintf(stderr, "Warning: Failed to set %d threads for output BAM\n", opt.nthreads);
+            }
+        }
         // Write BAM header using htslib compatible format
-        if (bam_hdr_write(bamoutfp, aux->h) < 0)
+        if (sam_hdr_write(bamoutfp, aux->h) < 0)
             errabort("Failed to write header to %s", export_target_bam);
     }
     h_chrlength_init();
@@ -2313,7 +2354,7 @@ int bamdst(int argc, char *argv[])
         freemem(opt.inputs[i]);
     freemem(opt.inputs);
     if (export_target_bam)
-        bgzf_close(bamoutfp);
+        hts_close(bamoutfp);
     freemem(opt.cutoffs);
     freemem(opt.ratios);
     freemem(opt.reference);
