@@ -30,13 +30,13 @@
 #include "commons.h"
 #include "count.h"
 
+// bgzf for writing tabix-able depth.gz file (must be before htslib to avoid BGZF conflict)
+#include "bgzf.h"
+
 // htslib for BAM/CRAM/SAM file reading
 #include <htslib/sam.h>
 #include <htslib/hts.h>
 #include <htslib/faidx.h>
-
-// bgzf for writing tabix-able depth.gz file (keep local implementation)
-#include "bgzf.h"
 
 // khash, kstring and knetfile are standard utils of klib
 #include "khash.h"
@@ -757,7 +757,7 @@ int readcore(struct depnode *header, bam1_t const *b, cntstat_t state)
     if (isNull(tmp))
         return 0;
     uint32_t *cigar = bam_get_cigar(b);
-    uint32_t end = bam_cigar2pos(cigar);
+    uint32_t end = bam_endpos(b);
 
     if (end >= tmp->start)
     {
@@ -1204,7 +1204,7 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
             if (para->tgt_node && readcore(para->tgt_node, b, state))
             {
                 if (export_target_bam)
-                    sam_write1(bamoutfp, aux->h, b);
+                    sam_write1(bamoutfp, a->h, b);
                 fs->n_tgt++;
             }
 
